@@ -250,6 +250,11 @@ def run_seeds(
     def work(url: str) -> dict:
         """单页：抓→raw.gz→去样板→改链接→转 md→落盘。返回 manifest 行。"""
         rel = relpaths[url]
+        # 断点续抓：md 已存在则跳过（raw.gz 同时存在），重启不丢进度
+        md_path0 = corpus / rel
+        if md_path0.exists():
+            return {"url": url, "local_path": rel, "sha256": "", "fetched_at": "",
+                    "title": "", "status": "kept", "reason": "resumed"}
         try:
             page = crawler.fetch_page(url, session=thread_session())
         except Exception as e:
