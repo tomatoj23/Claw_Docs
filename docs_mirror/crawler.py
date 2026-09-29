@@ -139,10 +139,26 @@ class Crawler:
         return pages, self._download_images(list(assets.values()))
 
     def fetch_page(self, url: str, session: requests.Session | None = None) -> Page | None:
-        """抓一页；失败（404/超时）记 failed 并返回 None，不拖垮整站。"""
+        """抓一页；失败（404/超时）记 failed 并返回 None，不拖垮整站。
+
+        429/503（限速）按 Retry-After 或指数退避重试，最多 5 次。
+        """
         sess = session or self.session
+        resp = None
+        for attempt in range(5):
+            try:
+                resp = sess.get(url, timeout=self.timeout)
+            except requests.RequestException as e:
+                self.failed.append({"url": url, "error": str(e)})
+                return None
+            if resp.status_code in (429, 503):
+                wait = int(resp.headers.get("Retry-After", 0) or 0) or min(2 ** attempt * 10, 300)
+                time.sleep(wait)
+                continue
+            break
+        if resp is None:
+            return None
         try:
-            resp = sess.get(url, timeout=self.timeout)
             resp.raise_for_status()
         except requests.RequestException as e:
             self.failed.append({"url": url, "error": str(e)})
