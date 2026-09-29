@@ -12,7 +12,7 @@ from .converter import Converter
 from .crawler import Asset, Crawler, Page
 from .curation import Verdict, curate
 from .extract import extract_content, extract_title
-from .urls import normalize_url, relpath_between, root_prefix, strip_fragment, url_to_relpath
+from .urls import canonical_url, normalize_url, relpath_between, root_prefix, strip_fragment, url_to_relpath
 
 
 def run(
@@ -74,7 +74,7 @@ def run(
         )
         results.append((page, content, verdict, extract_title(page.html)))
 
-    kept_urls = {strip_fragment(p.url): relpaths[p.url] for p, _, v, _ in results if v.status == "kept"}
+    kept_urls = {canonical_url(p.url): relpaths[p.url] for p, _, v, _ in results if v.status == "kept"}
 
     # 3. 转换 + 链接改写，写语料库
     for page, content, verdict, title in results:
@@ -83,6 +83,7 @@ def run(
         md_path.parent.mkdir(parents=True, exist_ok=True)
         if verdict.status == "kept":
             rewritten = _rewrite_links(content, page.url, md_rel, kept_urls, asset_map)
+            rewritten = _preserve_anchors(rewritten)
             md_text = (converter or _default_converter()).convert(rewritten)
             # 正文缺一级标题时才补标题，避免与页内 h1 重复
             if title and not re.match(r"\s*# ", md_text):
@@ -116,7 +117,7 @@ def run(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     linkmap = {
-        strip_fragment(p.url): (relpaths[p.url] if v.status == "kept" else None)
+        canonical_url(p.url): (relpaths[p.url] if v.status == "kept" else None)
         for p, _, v, _ in results
     }
     (corpus / "linkmap.json").write_text(
@@ -141,7 +142,7 @@ def _rewrite_links(
             continue
         from urllib.parse import urljoin
 
-        abs_url = normalize_url(urljoin(page_url, href))
+        abs_url = canonical_url(urljoin(page_url, href))
         if abs_url in kept_urls:
             target = kept_urls[abs_url]
             frag = _fragment(a["href"])
@@ -155,7 +156,7 @@ def _rewrite_links(
     for img in soup.find_all("img", src=True):
         from urllib.parse import urljoin
 
-        abs_url = normalize_url(urljoin(page_url, img["src"]))
+        abs_url = canonical_url(urljoin(page_url, img["src"]))
         if abs_url in asset_map:
             img["src"] = relpath_between(asset_map[abs_url], page_md_rel)
 
@@ -164,6 +165,20 @@ def _rewrite_links(
 
 def _fragment(href: str) -> str:
     return href.split("#", 1)[1] if "#" in href else ""
+
+
+def _preserve_anchors(html: str) -> str:
+    """为带 id/name 的元素补显式 <span id> 锚点，转换后 #fragment 链接仍可定位。"""
+    soup = BeautifulSoup(html, "lxml")
+    seen: set[str] = set()
+    for el in list(soup.find_all(attrs={"id": True})) + list(soup.find_all("a", attrs={"name": True})):
+        anchor_id = el.get("id") or el.get("name")
+        if not anchor_id or anchor_id in seen or el.name == "span" and el.get_text() == "":
+            continue
+        seen.add(anchor_id)
+        span = soup.new_tag("span", id=anchor_id)
+        el.insert_before(span)
+    return str(soup)
 
 
 def _is_internal(url: str, page_url: str) -> bool:
@@ -183,4 +198,4 @@ def _slug(start_url: str) -> str:
 def _default_converter():
     from .converter import get_converter
 
-    return get_converter("markdownify")
+    return get_converter("pandoc")

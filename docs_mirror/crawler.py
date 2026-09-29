@@ -11,7 +11,7 @@ from urllib.parse import urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 
-from .urls import asset_relpath, is_internal, normalize_url, root_prefix, strip_fragment
+from .urls import asset_relpath, canonical_url, is_internal, normalize_url, root_prefix, strip_fragment
 
 USER_AGENT = "docs-mirror/0.1 (local docs archiver)"
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico"}
@@ -90,9 +90,10 @@ class Crawler:
 
         while queue and len(pages) < max_pages:
             url = queue.pop(0)
-            if url in seen:
+            key = canonical_url(url)
+            if key in seen:
                 continue
-            seen.add(url)
+            seen.add(key)
 
             if self._ext(url) in VIDEO_EXT:
                 assets.setdefault(url, Asset(url=url, kind="video", local_path=None, note="视频不下载"))
@@ -113,6 +114,8 @@ class Crawler:
                 resp.encoding = resp.apparent_encoding or "utf-8"
 
             html = resp.text
+            url = normalize_url(str(resp.url))  # 重定向后的最终 URL，尾斜杠保留
+            seen.add(canonical_url(url))
             if not pages and looks_like_js_shell(html):
                 raise JsShellError(
                     f"疑似 JS 渲染站点（正文为空壳）：{url}。一期不支持客户端渲染，请换静态文档源。"
@@ -129,7 +132,7 @@ class Crawler:
 
             for link in page.links:
                 n = normalize_url(link)
-                if n not in seen and is_internal(n, self.start_url) and self._in_scope(n):
+                if canonical_url(n) not in seen and is_internal(n, self.start_url) and self._in_scope(n):
                     queue.append(n)
             for img in page.images:
                 self._collect_asset(assets, img, "image")

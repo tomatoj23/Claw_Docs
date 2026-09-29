@@ -43,20 +43,20 @@ Status: ready-for-agent
 - **完整镜像（Raw Mirror）**：全部已抓页面的原始 HTML + 图片一页不删（视频除外，只在清单记原 URL）。它是校验基准、取舍审计依据、重转数据源。输出目录中为 `raw/`。
 - **取舍机制**：脚本启发式粗筛（URL 模式、正文密度、样板识别）产出待审清单（manifest），由 agent 裁决边界并沉淀为站点配置包；不逐页调用 LLM。站点配置包可覆盖启发式（URL 通配规则、样板选择器、图片开关等）。
 - **清单（Manifest）**：每页记录源 URL、抓取时间、内容 hash、kept/rejected、理由。第一版即写入；增量同步逻辑为二期，不在本 spec 范围。
-- **转换契约**：爬虫输出干净正文 HTML（去样板、站内链接与图片路径已本地化），转换器只做 HTML→MD，单文件进单文件出。适配器接口下优先进程内调用 `HTML_TO_MD` 项目的 `html_fragment_to_markdown`，回落 markdownify；两适配器可经配置切换。
+- **转换契约**：爬虫输出干净正文 HTML（去样板、站内链接与图片路径已本地化），转换器只做 HTML→MD，单文件进单文件出。适配器接口下优先用项目内 vendored pandoc（`tools/pandoc/`，由 `scripts/install_pandoc.py` 安装，不依赖全局 pandoc、不跨项目），回落 markdownify；两适配器可经配置切换。
 - **去样板归属**：样板剥离由爬虫侧负责（内置启发式 + 站点配置覆盖），不塞给转换器，保持转换器通用。
 - **链接改写**：站内链接改写为指向本地 `.md` 相对路径（含锚点）；外部链接保持原 URL；指向被 rejected 页面的链接改写策略为保留原文本并标注（不制造死链）。
 - **媒体策略**：正文引用的图片保留（可配置关闭）；视频不下载，原位标注原 URL。
 - **JS 重站点**：一期不支持客户端渲染，检测到疑似 JS 站时明确报错提示；不上 Playwright。
 - **输出布局**：`corpus/<站点slug>/` 下 `*.md`（镜像源站目录结构）、`assets/`、`raw/`、`manifest.json`、`linkmap.json`、`_INDEX.md`。
-- **依赖**：requests、beautifulsoup4、markdownify、lxml（环境已装）；trafilatura/readability 可选补充，正文提取先用启发式实现。
+- **依赖**：requests、beautifulsoup4、markdownify、lxml（环境已装）；pandoc 3.12 vendored 于 `tools/pandoc/`（gitignore，`scripts/install_pandoc.py` 安装）；trafilatura/readability 可选补充，正文提取先用启发式实现。
 - **技术栈**：Python 3.14，pytest 测试。
 
 ## Testing Decisions
 
 - 好的测试只测外部行为（CLI 产出的语料库文件与清单），不测实现细节（内部函数、启发式中间值）。
 - **接缝 1（主）**：CLI 端到端。pytest 起本地 fixture HTTP 服务，含两个虚构站点：站点 A 纯文档站（多页互链 + 图片）、站点 B 图文视频混合站（含 blog/视频/广告/侧栏噪音）。跑 `docs-mirror` CLI，断言语料库产物：md 正文内容正确、站内链接改写后有效、assets 落盘、manifest 的 kept/rejected 与理由、`raw/` 完整性。测试全程零外网。
-- **接缝 2**：转换器契约。markdownify 与 HTML_TO_MD 两个适配器跑同一套契约断言（同一输入 HTML 片段集合，断言输出 md 的标题/代码块/表格/链接等不变量），保证将来切换可替换。
+- **接缝 2**：转换器契约。pandoc 与 markdownify 两个适配器跑同一套契约断言（同一输入 HTML 片段集合，断言输出 md 的标题/代码块/表格/链接等不变量），保证将来切换可替换。
 - 链接改写、去样板、取舍启发式等行为一律通过接缝 1 的 fixture 覆盖，不开独立单元测试接缝。
 - 先例：`HTML_TO_MD` 项目的 pytest 风格（fixture 驱动、断言外部产物）。
 
@@ -72,6 +72,6 @@ Status: ready-for-agent
 
 ## Further Notes
 
-- 转换器长期目标是接入用户自己的 `HTML_TO_MD` 项目（`D:\My_Projects\HTML_TO_MD` 的 `html_fragment_to_markdown`）；该页面级口径当前是 RST 进 MD 出、HTML 为校验基准，因此本项目只借它的 HTML 片段转换函数与校验器思路，不整站调用其 CLI。
+- 转换器已定为项目内 vendored pandoc（3.12，`tools/pandoc/`，只用 tools/ 内二进制、不依赖全局 pandoc、不跨项目引用）；GFM 输出、读写两侧关 smart 保字形、`--wrap=none` 不折行、`--eol=lf` 换行确定。曾评估的 `HTML_TO_MD` 项目仅借其校验器思路，不做代码依赖。
 - 其六维校验器（链接/图片/标题树/代码块/表格/正文比对）可为本项目校验段提供直接参考甚至复用。
 - `raw/` 完整镜像同时服务于用户明确提出的"核对转换后文档、避免脚本疏漏"诉求。

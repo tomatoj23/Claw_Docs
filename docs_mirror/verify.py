@@ -132,8 +132,11 @@ def _dead_links(corpus: Path) -> tuple[list[tuple[str, str]], int]:
 
 
 def _plain(html: str) -> str:
-    """规范化纯文本：去 HTML 标签、空白与 markdown 语法字符，只留词字符与 CJK。"""
-    text = re.sub(r"<[^>]+>", "", html)
+    """规范化纯文本：解码 HTML 实体、去标签/空白/markdown 语法字符，只留词字符与 CJK。"""
+    import html as _html
+
+    text = _html.unescape(html)
+    text = re.sub(r"<[^>]+>", "", text)
     return re.sub(r"[^\w一-鿿]", "", text, flags=re.UNICODE)
 
 

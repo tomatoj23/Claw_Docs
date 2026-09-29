@@ -14,10 +14,18 @@ def strip_fragment(url: str) -> str:
 
 
 def normalize_url(url: str) -> str:
-    """去 fragment；host 小写；路径保证以 / 开头。保留 query（极少数文档页需要）。"""
+    """去 fragment；host 小写；路径保证以 / 开头。保留 query。尾斜杠保留（相对链接解析需要）。"""
     url = strip_fragment(url)
     p = urlparse(url)
     path = unquote(p.path) or "/"
+    return f"{p.scheme}://{p.netloc.lower()}{path}" + (f"?{p.query}" if p.query else "")
+
+
+def canonical_url(url: str) -> str:
+    """同一页面的稳定身份：归一化后去尾斜杠（/foo/ 与 /foo 视为同页），仅用于判重与查找。"""
+    u = normalize_url(url)
+    p = urlparse(u)
+    path = p.path.rstrip("/") or "/"
     return f"{p.scheme}://{p.netloc.lower()}{path}" + (f"?{p.query}" if p.query else "")
 
 

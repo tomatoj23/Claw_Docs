@@ -64,7 +64,8 @@ def _add_crawl_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--out", default="corpus", help="输出根目录（默认 corpus/）")
     p.add_argument("--mode", choices=["full", "filtered"], default="full",
                    help="full=整站全要；filtered=取舍过滤混合站")
-    p.add_argument("--converter", choices=["markdownify", "html_to_md"], default="markdownify")
+    p.add_argument("--converter", choices=["pandoc", "markdownify"], default="pandoc",
+                   help="HTML→MD 转换器（默认 pandoc=项目内 tools/pandoc/）")
     p.add_argument("--no-images", action="store_true", help="不下载图片")
     p.add_argument("--max-pages", type=int, default=1000)
     p.add_argument("--scope", action="append", default=None,
