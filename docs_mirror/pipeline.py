@@ -26,11 +26,17 @@ def run(
 ) -> Path:
     slug = _slug(start_url)
     corpus = Path(out_root) / slug
+    corpus.mkdir(parents=True, exist_ok=True)
     raw_dir = corpus / "raw"
     prefix = root_prefix(start_url)
 
     crawler = Crawler(start_url, scope_prefixes=scope)
     pages, assets = crawler.crawl(max_pages=max_pages)
+    if not pages and crawler.failed:
+        raise RuntimeError(
+            f"零页抓取成功（失败 {len(crawler.failed)} 条，多为限速）。"
+            f"首条: {crawler.failed[0]['error'][:120]}"
+        )
 
     # 路径冲突消解：不同 URL 映射到同一路径时加序号后缀（如 / 与 /index.html）
     relpaths: dict[str, str] = {}

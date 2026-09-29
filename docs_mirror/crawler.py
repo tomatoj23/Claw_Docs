@@ -47,6 +47,10 @@ class JsShellError(RuntimeError):
     """疑似 JS 渲染站，纯 HTTP 抓不到正文。"""
 
 
+class RateLimitedError(RuntimeError):
+    """持续被限速（429），中止本轮抓取，稍后断点续跑。"""
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -84,6 +88,7 @@ class Crawler:
         self.scope_prefixes = scope_prefixes if scope_prefixes is not None else [self.prefix]
         self.failed: list[dict] = []
         self.truncated = False
+        self.consecutive_ratelimits = 0
         self.delay = delay
         self.timeout = timeout
         self.session = requests.Session()
@@ -158,6 +163,15 @@ class Crawler:
             break
         if resp is None:
             return None
+        if resp.status_code in (429, 503):
+            self.consecutive_ratelimits += 1
+            self.failed.append({"url": url, "error": f"{resp.status_code} rate limited (retries exhausted)"})
+            if self.consecutive_ratelimits >= 20:
+                raise RateLimitedError(
+                    f"连续 {self.consecutive_ratelimits} 页被限速（429/503），中止本轮；稍后重跑可断点续抓。"
+                )
+            return None
+        self.consecutive_ratelimits = 0
         try:
             resp.raise_for_status()
         except requests.RequestException as e:
