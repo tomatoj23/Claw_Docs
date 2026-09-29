@@ -1,11 +1,13 @@
-"""爬虫：抓页面、下图片、记清单，产出完整镜像（除视频）。"""
+"""爬虫：抓页面、下图片、记清单，产出完整镜像（除视频）。支持 BFS 与种子清单两种驱动。"""
 
 from __future__ import annotations
 
 import hashlib
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -18,11 +20,13 @@ IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico"}
 VIDEO_EXT = {".mp4", ".webm", ".mov", ".avi", ".mkv", ".m3u8"}
 JS_SHELL_MARKERS = ('id="root"', 'id="app"', "__NEXT_DATA__", "ng-app")
 
+_tls = threading.local()
+
 
 @dataclass
 class Page:
     url: str
-    html: str
+    html: str | None
     sha256: str
     fetched_at: str
     links: list[str] = field(default_factory=list)
@@ -54,6 +58,16 @@ def looks_like_js_shell(html: str) -> bool:
         return False
     lowered = html.lower()
     return any(m in lowered for m in JS_SHELL_MARKERS)
+
+
+def thread_session() -> requests.Session:
+    """每线程一个 Session（requests.Session 非线程安全，线程本地复用保持 keep-alive）。"""
+    s = getattr(_tls, "session", None)
+    if s is None:
+        s = requests.Session()
+        s.headers["User-Agent"] = USER_AGENT
+        _tls.session = s
+    return s
 
 
 class Crawler:
@@ -99,34 +113,10 @@ class Crawler:
                 assets.setdefault(url, Asset(url=url, kind="video", local_path=None, note="视频不下载"))
                 continue
 
-            try:
-                resp = self.session.get(url, timeout=self.timeout)
-                resp.raise_for_status()
-            except requests.RequestException as e:
-                # 单页失败（死链/超时）不拖垮整站，记入 manifest 供审计
-                self.failed.append({"url": url, "error": str(e)})
+            page = self.fetch_page(url)
+            if page is None:
                 continue
-            ctype = resp.headers.get("Content-Type", "")
-            if "html" not in ctype:
-                continue
-            # 服务器没声明 charset 时 requests 默认 ISO-8859-1，会把 UTF-8 中文解码成乱码
-            if "charset" not in ctype.lower():
-                resp.encoding = resp.apparent_encoding or "utf-8"
 
-            html = resp.text
-            url = normalize_url(str(resp.url))  # 重定向后的最终 URL，尾斜杠保留
-            seen.add(canonical_url(url))
-            if not pages and looks_like_js_shell(html):
-                raise JsShellError(
-                    f"疑似 JS 渲染站点（正文为空壳）：{url}。一期不支持客户端渲染，请换静态文档源。"
-                )
-
-            page = Page(
-                url=url,
-                html=html,
-                sha256=hashlib.sha256(resp.content).hexdigest(),
-                fetched_at=_now(),
-            )
             self._extract_refs(page)
             pages.append(page)
 
@@ -148,8 +138,37 @@ class Crawler:
             self.truncated = True
         return pages, self._download_images(list(assets.values()))
 
+    def fetch_page(self, url: str, session: requests.Session | None = None) -> Page | None:
+        """抓一页；失败（404/超时）记 failed 并返回 None，不拖垮整站。"""
+        sess = session or self.session
+        try:
+            resp = sess.get(url, timeout=self.timeout)
+            resp.raise_for_status()
+        except requests.RequestException as e:
+            self.failed.append({"url": url, "error": str(e)})
+            return None
+        ctype = resp.headers.get("Content-Type", "")
+        if "html" not in ctype:
+            return None
+        # 服务器没声明 charset 时 requests 默认 ISO-8859-1，会把 UTF-8 中文解码成乱码
+        if "charset" not in ctype.lower():
+            resp.encoding = resp.apparent_encoding or "utf-8"
+
+        html = resp.text
+        if looks_like_js_shell(html):
+            raise JsShellError(
+                f"疑似 JS 渲染站点（正文为空壳）：{url}。一期不支持客户端渲染，请换静态文档源。"
+            )
+        return Page(
+            url=normalize_url(str(resp.url)),  # 重定向后的最终 URL，尾斜杠保留
+            html=html,
+            sha256=hashlib.sha256(resp.content).hexdigest(),
+            fetched_at=_now(),
+        )
+
     def _extract_refs(self, page: Page) -> None:
-        soup = BeautifulSoup(page.html, "lxml")
+        html = page.html or ""
+        soup = BeautifulSoup(html, "lxml")
         base = page.url
         for a in soup.find_all("a", href=True):
             href = strip_fragment(urljoin(base, a["href"]))

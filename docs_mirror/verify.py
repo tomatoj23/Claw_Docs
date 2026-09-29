@@ -53,9 +53,8 @@ def verify_corpus(corpus: Path) -> VerifyReport:
 
     # raw/ 应覆盖 manifest 的每一页
     for p in pages:
-        raw_path = raw_dir / (p["local_path"].removesuffix(".md") + ".html")
-        if not raw_path.exists():
-            report.problems.append(f"raw 缺页: {p['url']}（期望 {raw_path.relative_to(corpus)}）")
+        if _raw_path(raw_dir, p["local_path"]) is None:
+            report.problems.append(f"raw 缺页: {p['url']}（期望 raw/{p['local_path'].removesuffix('.md')}.html[.gz]）")
 
     # kept 页应有 md
     kept = [p for p in pages if p["status"] == "kept"]
@@ -79,10 +78,10 @@ def verify_corpus(corpus: Path) -> VerifyReport:
     ratios = []
     for p in kept:
         md_path = corpus / p["local_path"]
-        raw_path = raw_dir / (p["local_path"].removesuffix(".md") + ".html")
-        if not (md_path.exists() and raw_path.exists()):
+        raw_path = _raw_path(raw_dir, p["local_path"])
+        if not (md_path.exists() and raw_path):
             continue
-        raw_text = _plain(extract_content(raw_path.read_text(encoding="utf-8")))
+        raw_text = _plain(extract_content(_read_raw(raw_path)))
         md_text = _plain(_strip_link_targets(md_path.read_text(encoding="utf-8")))
         ratio = _coverage(raw_text, md_text)
         ratios.append((ratio, p["local_path"]))
@@ -98,9 +97,9 @@ def verify_corpus(corpus: Path) -> VerifyReport:
     title_missing = 0
     for p in kept:
         md_path = corpus / p["local_path"]
-        raw_path = raw_dir / (p["local_path"].removesuffix(".md") + ".html")
-        if md_path.exists() and raw_path.exists():
-            h1 = _first_h1(extract_content(raw_path.read_text(encoding="utf-8")))
+        raw_path = _raw_path(raw_dir, p["local_path"])
+        if md_path.exists() and raw_path:
+            h1 = _first_h1(extract_content(_read_raw(raw_path)))
             h1_norm = _plain(h1)
             md_norm = _plain(_strip_link_targets(md_path.read_text(encoding="utf-8")[:2000]))
             if h1_norm and h1_norm not in md_norm:
@@ -109,6 +108,24 @@ def verify_corpus(corpus: Path) -> VerifyReport:
     report.stats["标题丢失数"] = title_missing
 
     return report
+
+
+def _raw_path(raw_dir: Path, local_path: str) -> Path | None:
+    """raw 镜像查找：兼容 .html 与 .html.gz（种子模式压缩存）。"""
+    stem = local_path.removesuffix(".md")
+    for suffix in (".html.gz", ".html"):
+        p = raw_dir / (stem + suffix)
+        if p.exists():
+            return p
+    return None
+
+
+def _read_raw(path: Path) -> str:
+    import gzip
+
+    if path.suffix == ".gz":
+        return gzip.decompress(path.read_bytes()).decode("utf-8")
+    return path.read_text(encoding="utf-8")
 
 
 def _dead_links(corpus: Path) -> tuple[list[tuple[str, str]], int]:

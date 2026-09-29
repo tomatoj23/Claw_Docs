@@ -149,9 +149,9 @@ def _rewrite_links(
             rel = relpath_between(target, page_md_rel)
             a["href"] = rel + (f"#{frag}" if frag else "")
         elif _is_internal(abs_url, page_url):
-            # 指向被拒/未抓页面：保留文本，标注，不造死链
+            # 指向被拒/未抓页面：保留原 URL 供回查，标注不造本地死链
+            a["href"] = abs_url
             a.string = f"{a.get_text()}（未收录）"
-            a.unwrap()
 
     for img in soup.find_all("img", src=True):
         from urllib.parse import urljoin
@@ -199,3 +199,141 @@ def _default_converter():
     from .converter import get_converter
 
     return get_converter("pandoc")
+
+
+# ============ 种子清单驱动（超大 API 树专用） ============
+
+import gzip
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from .crawler import thread_session
+from .urls import url_to_relpath as _u2r
+
+
+def run_seeds(
+    seeds: list[str],
+    out_root: Path,
+    slug: str,
+    converter: Converter,
+    prefix: str,
+    workers: int = 8,
+    keep_images: bool = True,
+) -> Path:
+    """sitemap 种子驱动的流式抓取：逐页抓取→gzip raw 落盘→转换→md 落盘，内存恒定。
+
+    与 run() 的差异：不做 BFS 链接发现（种子即全集）、并发抓取、raw 用 gzip（约 1/10 体积）。
+    链接改写目标集合 = 种子全集（提前算好），跨库/域外链接保留原 URL。
+    """
+    corpus = Path(out_root) / slug
+    raw_dir = corpus / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+
+    # 种子全集即 linkmap：提前算好所有 URL→本地路径，转换时直接查
+    relpaths: dict[str, str] = {}
+    used: set[str] = set()
+    for u in seeds:
+        rel = _u2r(u, prefix)
+        if rel in used:
+            stem = rel.removesuffix(".md")
+            n = 2
+            while f"{stem}-{n}.md" in used:
+                n += 1
+            rel = f"{stem}-{n}.md"
+        used.add(rel)
+        relpaths[u] = rel
+    kept_urls = {canonical_url(u): relpaths[u] for u in seeds}
+
+    crawler = Crawler(seeds[0], scope_prefixes=["/"])
+    manifest_pages: list[dict] = []
+    seen_images: set[str] = set()
+
+    def work(url: str) -> dict:
+        """单页：抓→raw.gz→去样板→改链接→转 md→落盘。返回 manifest 行。"""
+        rel = relpaths[url]
+        try:
+            page = crawler.fetch_page(url, session=thread_session())
+        except Exception as e:
+            return {"url": url, "local_path": rel, "status": "error", "reason": str(e)[:200]}
+        if page is None:
+            err = crawler.failed[-1]["error"][:200] if crawler.failed else ""
+            return {"url": url, "local_path": rel, "status": "error", "reason": err}
+
+        assert page.html is not None
+        raw_file = raw_dir / (rel.removesuffix(".md") + ".html.gz")
+        raw_file.parent.mkdir(parents=True, exist_ok=True)
+        raw_file.write_bytes(gzip.compress(page.html.encode("utf-8"), 6))
+
+        content = extract_content(page.html)
+        rewritten = _rewrite_links(content, page.url, rel, kept_urls, {})
+        rewritten = _preserve_anchors(rewritten)
+        md_text = converter.convert(rewritten)
+        title = extract_title(page.html)
+        if title and not re.match(r"\s*# ", md_text):
+            md_text = f"# {title}\n\n{md_text}"
+        md_path = corpus / rel
+        md_path.parent.mkdir(parents=True, exist_ok=True)
+        md_path.write_text(md_text, encoding="utf-8")
+
+        row = {
+            "url": page.url,
+            "local_path": rel,
+            "sha256": page.sha256,
+            "fetched_at": page.fetched_at,
+            "title": title,
+            "status": "kept",
+            "reason": "seeds",
+        }
+        if keep_images:
+            for img in page.images:
+                _fetch_image(img, corpus, prefix, seen_images, crawler)
+        return row
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {ex.submit(work, u): u for u in seeds}
+        for i, fut in enumerate(as_completed(futures), 1):
+            manifest_pages.append(fut.result())
+            if i % 500 == 0:
+                print(f"  ... {i}/{len(seeds)} 页完成", flush=True)
+
+    manifest_pages.sort(key=lambda r: r["local_path"])
+    (corpus / "manifest.json").write_text(
+        json.dumps(
+            {
+                "start_url": seeds[0],
+                "mode": "seeds",
+                "pages": manifest_pages,
+                "failed": crawler.failed,
+                "truncated": False,
+                "assets": [],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (corpus / "linkmap.json").write_text(
+        json.dumps({canonical_url(u): relpaths[u] for u in seeds}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return corpus
+
+
+def _fetch_image(img_url: str, corpus: Path, prefix: str, seen: set[str], crawler: Crawler) -> None:
+    """图片去重下载（线程安全由 GIL 保证 set/dict 原子操作）。"""
+    from .urls import asset_relpath
+
+    key = canonical_url(img_url)
+    if key in seen:
+        return
+    seen.add(key)
+    local = asset_relpath(img_url, prefix)
+    dest = corpus / local
+    if dest.exists():
+        return
+    try:
+        resp = thread_session().get(img_url, timeout=20)
+        resp.raise_for_status()
+    except Exception:
+        return
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(resp.content)
