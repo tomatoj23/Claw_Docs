@@ -22,13 +22,14 @@ def run(
     converter: Converter | None = None,
     keep_images: bool = True,
     max_pages: int = 1000,
+    scope: list[str] | None = None,
 ) -> Path:
     slug = _slug(start_url)
     corpus = Path(out_root) / slug
     raw_dir = corpus / "raw"
     prefix = root_prefix(start_url)
 
-    crawler = Crawler(start_url)
+    crawler = Crawler(start_url, scope_prefixes=scope)
     pages, assets = crawler.crawl(max_pages=max_pages)
 
     # 路径冲突消解：不同 URL 映射到同一路径时加序号后缀（如 / 与 /index.html）
@@ -105,6 +106,7 @@ def run(
             for p, _, v, t in results
         ],
         "failed": crawler.failed,
+        "truncated": crawler.truncated,
         "assets": [
             {"url": a.url, "kind": a.kind, "local_path": a.local_path, "note": a.note}
             for a in assets

@@ -57,14 +57,30 @@ def looks_like_js_shell(html: str) -> bool:
 
 
 class Crawler:
-    def __init__(self, start_url: str, delay: float = 0.1, timeout: float = 20.0):
+    def __init__(
+        self,
+        start_url: str,
+        delay: float = 0.2,
+        timeout: float = 20.0,
+        scope_prefixes: list[str] | None = None,
+    ):
         self.start_url = normalize_url(start_url)
         self.prefix = root_prefix(start_url)
+        # 抓取范围：默认只在起始 URL 的目录树内（防止大域爬爆），可用 scope 覆盖
+        self.scope_prefixes = scope_prefixes if scope_prefixes is not None else [self.prefix]
         self.failed: list[dict] = []
+        self.truncated = False
         self.delay = delay
         self.timeout = timeout
         self.session = requests.Session()
         self.session.headers["User-Agent"] = USER_AGENT
+
+    def _in_scope(self, url: str) -> bool:
+        path = urlparse(url).path
+        for p in self.scope_prefixes:
+            if path.startswith(p) or path.rstrip("/") == p.rstrip("/"):
+                return True
+        return False
 
     def crawl(self, max_pages: int = 1000) -> tuple[list[Page], list[Asset]]:
         pages: list[Page] = []
@@ -113,7 +129,7 @@ class Crawler:
 
             for link in page.links:
                 n = normalize_url(link)
-                if n not in seen and is_internal(n, self.start_url):
+                if n not in seen and is_internal(n, self.start_url) and self._in_scope(n):
                     queue.append(n)
             for img in page.images:
                 self._collect_asset(assets, img, "image")
@@ -125,6 +141,8 @@ class Crawler:
             if queue:
                 time.sleep(self.delay)
 
+        if queue:
+            self.truncated = True
         return pages, self._download_images(list(assets.values()))
 
     def _extract_refs(self, page: Page) -> None:
