@@ -83,7 +83,7 @@ def verify_corpus(corpus: Path) -> VerifyReport:
         if not (md_path.exists() and raw_path.exists()):
             continue
         raw_text = _plain(extract_content(raw_path.read_text(encoding="utf-8")))
-        md_text = _plain(md_path.read_text(encoding="utf-8"))
+        md_text = _plain(_strip_link_targets(md_path.read_text(encoding="utf-8")))
         ratio = _coverage(raw_text, md_text)
         ratios.append((ratio, p["local_path"]))
         if ratio < 0.6:
@@ -94,14 +94,16 @@ def verify_corpus(corpus: Path) -> VerifyReport:
         avg = sum(r for r, _ in ratios) / len(ratios)
         report.stats["正文覆盖率 平均/最低"] = f"{avg:.1%} / {min(r for r, _ in ratios):.1%}"
 
-    # 标题存在性（用正文 h1 校验；<title> 带站点后缀不逐字比）
+    # 标题存在性（用正文 h1 校验；规范化去 ¶ 锚/语法字符后比对）
     title_missing = 0
     for p in kept:
         md_path = corpus / p["local_path"]
         raw_path = raw_dir / (p["local_path"].removesuffix(".md") + ".html")
         if md_path.exists() and raw_path.exists():
             h1 = _first_h1(extract_content(raw_path.read_text(encoding="utf-8")))
-            if h1 and h1 not in md_path.read_text(encoding="utf-8")[:2000]:
+            h1_norm = _plain(h1)
+            md_norm = _plain(_strip_link_targets(md_path.read_text(encoding="utf-8")[:2000]))
+            if h1_norm and h1_norm not in md_norm:
                 title_missing += 1
                 report.problems.append(f"标题丢失: {p['local_path']}（原 h1 {h1!r}）")
     report.stats["标题丢失数"] = title_missing
@@ -113,12 +115,15 @@ def _dead_links(corpus: Path) -> tuple[list[tuple[str, str]], int]:
     dead, total = [], 0
     for md in corpus.rglob("*.md"):
         text = md.read_text(encoding="utf-8")
+        # 先剥掉代码块与行内代码，代码里的括号方块不是链接
+        text = re.sub(r"```.*?```", "", text, flags=re.S)
+        text = re.sub(r"`[^`\n]*`", "", text)
         for link in re.findall(r"\]\(([^)]+)\)", text):
             link = link.strip()
-            if re.match(r"^(https?://|mailto:|#|ftp:|<)", link):
+            if re.match(r"^(https?://|mailto:|#|ftp:|<|data:)", link):
                 continue
             target = link.split("#")[0].split('"')[0].strip()
-            if not target:
+            if not target or " " in target:
                 continue
             total += 1
             if not (md.parent / target).resolve().exists():
@@ -130,6 +135,12 @@ def _plain(html: str) -> str:
     """规范化纯文本：去 HTML 标签、空白与 markdown 语法字符，只留词字符与 CJK。"""
     text = re.sub(r"<[^>]+>", "", html)
     return re.sub(r"[^\w一-鿿]", "", text, flags=re.UNICODE)
+
+
+def _strip_link_targets(md: str) -> str:
+    """去掉 markdown 链接目标 URL，只留可见文本（避免 URL 混入正文比对）。"""
+    md = re.sub(r"\]\([^)]*\)", "]", md)
+    return re.sub(r"<https?://[^>]+>", "", md)
 
 
 def _first_h1(content_html: str) -> str:
